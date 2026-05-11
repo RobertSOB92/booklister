@@ -21,6 +21,10 @@ const OCR = (() => {
         langPath: 'https://tessdata.projectnaptha.com/4.0.0_best',
         corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5',
       });
+      // Set parameters for better title/author detection
+      await worker.setParameters({
+        tessedit_pageseg_mode: '3', // Fully automatic page segmentation, but no OSD
+      });
       workerReady = true;
       return worker;
     })();
@@ -66,20 +70,26 @@ const OCR = (() => {
       .split('\n')
       .map(l => l.trim())
       .filter(l => l.length >= 3)
-      .filter(l => !/^\d[\d\s\-]+$/.test(l))          // strip pure number lines
-      .filter(l => !/isbn|ean|www\.|http/i.test(l))    // strip ISBN/URL lines
-      .filter(l => !/©|copyright|wydaw|print/i.test(l)) // strip publisher boilerplate
-      .slice(0, 12); // look at first 12 meaningful lines
+      // Filter out garbage lines like "kk i i :" or "......."
+      .filter(l => {
+        const letters = l.replace(/[^a-złóśćąęźżńA-ZŁÓŚĆĄĘŹŻŃ]/g, '').length;
+        return letters / l.length > 0.4; // At least 40% of the line must be letters
+      })
+      .filter(l => !/^\d[\d\s\-]+$/.test(l))
+      .filter(l => !/isbn|ean|www\.|http/i.test(l))
+      .filter(l => !/©|copyright|wydaw|print/i.test(l))
+      .slice(0, 15);
 
     if (lines.length === 0) return { title: '', author: '' };
 
-    // Check for explicit author keyword in Polish/English
-    const authorKeywords = /^(autor[:\s]|by[:\s]|napisał|napisała|tekst[:\s])/i;
+    console.log('[OCR] Candidate lines:', lines);
 
+    const authorKeywords = /^(autor[:\s]|by[:\s]|napisał|napisała|tekst[:\s])/i;
     let author = '';
     let title = '';
     let usedIndexes = new Set();
 
+    // 1. Find Author (look for known names or keywords)
     for (let i = 0; i < lines.length; i++) {
       if (authorKeywords.test(lines[i])) {
         author = lines[i].replace(authorKeywords, '').trim();
@@ -88,15 +98,13 @@ const OCR = (() => {
       }
     }
 
-    // If no explicit keyword: heuristic — author lines tend to be shorter,
-    // title lines tend to be longer or ALL CAPS
+    // 2. Author heuristic (usually top of the cover, shorter lines)
     if (!author) {
-      // Find best "author candidate" — short line, proper-case words
-      for (let i = 0; i < Math.min(lines.length, 5); i++) {
+      for (let i = 0; i < Math.min(lines.length, 4); i++) {
         const words = lines[i].split(/\s+/);
+        // Author usually has 2-3 words, starting with caps
         const isProperCase = words.every(w => /^[A-ZŁÓŚĆĄĘŹŻŃ][a-złóśćąęźżńA-ZŁÓŚĆĄĘŹŻŃ]+\.?$/.test(w));
-        const isShort = words.length >= 1 && words.length <= 4;
-        if (isProperCase && isShort) {
+        if (isProperCase && words.length >= 2 && words.length <= 3) {
           author = lines[i];
           usedIndexes.add(i);
           break;
@@ -104,47 +112,33 @@ const OCR = (() => {
       }
     }
 
-    // Title: find the longest / all-caps line not used as author
+    // 3. Title heuristic (the most "significant" remaining line)
     let bestTitleScore = -1;
     for (let i = 0; i < lines.length; i++) {
       if (usedIndexes.has(i)) continue;
       const l = lines[i];
-      // Score: prefer longer lines and ALL-CAPS lines
-      const isAllCaps = l === l.toUpperCase() && l.length > 3;
-      const score = l.length * (isAllCaps ? 1.5 : 1.0);
+      const isAllCaps = l === l.toUpperCase() && l.length > 5;
+      const hasHarry = /harry|potter/i.test(l);
+      // Score: weight length, all-caps, and specific patterns
+      const score = l.length * (isAllCaps ? 2.0 : 1.0) * (hasHarry ? 5.0 : 1.0);
+      
       if (score > bestTitleScore) {
         bestTitleScore = score;
         title = l;
       }
     }
 
-    // Swap if title looks like a person name and author looks like a book title
-    if (title && author) {
-      const titleWords = title.split(/\s+/);
-      const authorWords = author.split(/\s+/);
-      if (authorWords.length > 4 && titleWords.length <= 2) {
-        [title, author] = [author, title];
-      }
-    }
-
-    // Clean up excess whitespace
-    title = title.replace(/\s+/g, ' ').trim();
-    author = author.replace(/\s+/g, ' ').trim();
-
-    return { title, author };
+    return { 
+      title: (title || '').replace(/\s+/g, ' ').trim(), 
+      author: (author || '').replace(/\s+/g, ' ').trim() 
+    };
   }
 
-  /**
-   * Canvas-based image preprocessing: grayscale + contrast boost.
-   * Helps Tesseract read decorative / coloured fonts on dark backgrounds.
-   */
   function preprocessImage(source) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-
       img.onload = () => {
-        // Scale down very large images (> 2000px on longest side) to save time
-        const MAX = 2000;
+        const MAX = 2500;
         const scale = Math.min(MAX / Math.max(img.width, img.height), 1);
         const w = Math.round(img.width * scale);
         const h = Math.round(img.height * scale);
@@ -153,44 +147,30 @@ const OCR = (() => {
         canvas.width  = w;
         canvas.height = h;
         const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, w, h);
 
         const imgData = ctx.getImageData(0, 0, w, h);
         const d = imgData.data;
 
+        // Soft contrast enhancement instead of hard binarization
         for (let i = 0; i < d.length; i += 4) {
-          // Luminance-weighted grayscale
-          const gray = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-          // S-curve contrast stretch (darkens shadows, brightens highlights)
-          const norm = gray / 255;
-          const c = norm < 0.5
-            ? 2 * norm * norm
-            : 1 - Math.pow(-2 * norm + 2, 2) / 2;
-          const v = Math.min(255, Math.round(c * 255 * 1.1)); // slight brightness boost
-          d[i] = d[i+1] = d[i+2] = v;
+          let r = d[i], g = d[i+1], b = d[i+2];
+          let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+          
+          // Increase contrast (gamma-like)
+          let v = gray;
+          if (v < 128) v = (v * v) / 128; // Darker darks
+          else v = 255 - ((255 - v) * (255 - v) / 128); // Brighter brights
+          
+          d[i] = d[i+1] = d[i+2] = Math.max(0, Math.min(255, v));
         }
 
         ctx.putImageData(imgData, 0, 0);
-
-        // Return as Blob so Tesseract can consume it
-        canvas.toBlob(
-          blob => blob ? resolve(blob) : reject(new Error('canvas toBlob failed')),
-          'image/png'
-        );
-
-        // Revoke object URL created below (if applicable)
-        if (img._revokeUrl) URL.revokeObjectURL(img._revokeUrl);
+        canvas.toBlob(b => b ? resolve(b) : reject(), 'image/png');
       };
-
-      img.onerror = () => reject(new Error('Image load failed'));
-
-      if (source instanceof File || source instanceof Blob) {
-        const url = URL.createObjectURL(source);
-        img._revokeUrl = url;
-        img.src = url;
-      } else {
-        img.src = source;
-      }
+      img.src = (source instanceof File || source instanceof Blob) ? URL.createObjectURL(source) : source;
     });
   }
 

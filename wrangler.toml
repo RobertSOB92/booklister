@@ -1,8 +1,5 @@
-# wrangler.toml — Cloudflare Worker with static assets
+# wrangler.toml — Cloudflare Pages configuration
 name = "booklister"
-main = "_worker.js"
+pages_build_output_dir = "."
 compatibility_date = "2026-05-11"
 compatibility_flags = ["nodejs_compat"]
-
-[assets]
-directory = "."
