@@ -1,21 +1,12 @@
-/*
-  Cloudflare Pages — HTTP Headers Configuration
-  https://developers.cloudflare.com/pages/platform/headers/
-*/
+# Cloudflare Pages — HTTP Headers
+# Docs: https://developers.cloudflare.com/pages/configuration/headers/
 
-/*
-  Security headers for all routes
-*/
 /*
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
-  Permissions-Policy: camera=(), microphone=(), geolocation=()
   X-XSS-Protection: 1; mode=block
 
-/*
-  Cache static assets aggressively (JS, CSS)
-*/
 /*.js
   Cache-Control: public, max-age=31536000, immutable
 
