@@ -80,15 +80,20 @@ const OCR = (() => {
       .split('\n')
       .map(l => l.trim())
       .filter(l => l.length >= 3)
-      // Filter out garbage lines like "kk i i :" or "......."
+      // More lenient filtering for better results
       .filter(l => {
+        // Skip pure numbers/ISBN/codes
+        if (/^\d[\d\s\-]+$/.test(l)) return false;
+        if (/isbn|ean|www\.|http|©|copyright|wydaw|print/i.test(l)) return false;
+        // Skip pure symbols/dashes
+        if (/^[\s\-_\.]+$/.test(l)) return false;
+        
         const letters = l.replace(/[^a-złóśćąęźżńA-ZŁÓŚĆĄĘŹŻŃ]/g, '').length;
-        return letters / l.length > 0.35; // At least 35% of the line must be letters
+        const chars = l.length;
+        // More lenient: 20% letters is ok (down from 35%)
+        return letters / chars > 0.20 && letters >= 2;
       })
-      .filter(l => !/^\d[\d\s\-]+$/.test(l))
-      .filter(l => !/isbn|ean|www\.|http/i.test(l))
-      .filter(l => !/©|copyright|wydaw|print/i.test(l))
-      .slice(0, 15);
+      .slice(0, 20); // Increased from 15 to find better matches
 
     if (lines.length === 0) return { title: '', author: '' };
 
@@ -106,28 +111,47 @@ const OCR = (() => {
       }
     }
 
-    // 2. Author heuristic (usually top/bottom of the cover, shorter lines)
+    // 2. Author heuristic (usually top/bottom of cover, shorter lines)
     if (!author) {
-      for (let i = 0; i < Math.min(lines.length, 5); i++) {
-        const words = lines[i].split(/\s+/);
-        const isProperCase = words.every(w => /^[A-ZŁÓŚĆĄĘŹŻŃ][a-złóśćąęźżńA-ZŁÓŚĆĄĘŹŻŃ]+\.?$/.test(w));
-        if (isProperCase && words.length >= 2 && words.length <= 3) {
-          author = lines[i];
-          usedIndexes.add(i);
-          break;
+      for (let i = 0; i < Math.min(lines.length, 6); i++) {
+        const l = lines[i];
+        const words = l.split(/\s+/).filter(w => w.length > 0);
+        
+        // Look for 1-4 words in proper case (likely author names)
+        if (words.length >= 1 && words.length <= 4) {
+          const isProperCase = words.every(w => 
+            /^[A-ZŁÓŚĆĄĘŹŻŃ][a-złóśćąęźżńA-ZŁÓŚĆĄĘŹŻŃ]*\.?$/.test(w)
+          );
+          
+          // Also accept mixed case names that look like names
+          const isNameLike = !isProperCase && l.length <= 30 && /^[A-Za-z\s\-'\.]+$/.test(l);
+          
+          if (isProperCase || (isNameLike && i < 3)) {
+            author = l;
+            usedIndexes.add(i);
+            break;
+          }
         }
       }
     }
 
-    // 3. Title heuristic (the most "significant" remaining line)
+    // 3. Title heuristic (longest/most significant remaining line)
     let bestTitleScore = -1;
     for (let i = 0; i < lines.length; i++) {
       if (usedIndexes.has(i)) continue;
       const l = lines[i];
-      const isAllCaps = l === l.toUpperCase() && l.length > 5;
-      const hasHarry = /harry|potter/i.test(l);
-      // Score: weight length, all-caps, and specific patterns
-      const score = l.length * (isAllCaps ? 2.0 : 1.0) * (hasHarry ? 10.0 : 1.0);
+      
+      // Skip very short lines that are unlikely to be titles
+      if (l.length < 4) continue;
+      
+      const isAllCaps = l === l.toUpperCase() && l.length > 4;
+      const hasCommonKeywords = /harry|potter|twilight|hunger|games|hobbit|lord|rings|series|pamiętnik|władca|gra|pną/i.test(l);
+      
+      // More balanced scoring: prefer longer lines but not excessively
+      const baseScore = Math.min(l.length * 1.5, 40);
+      const capsBonus = isAllCaps ? 8 : 0;
+      const keywordBonus = hasCommonKeywords ? 5 : 0;
+      const score = baseScore + capsBonus + keywordBonus;
       
       if (score > bestTitleScore) {
         bestTitleScore = score;
@@ -142,7 +166,8 @@ const OCR = (() => {
   }
 
   /**
-   * Canvas-based image preprocessing with filters.
+   * Canvas-based image preprocessing with adaptive filters.
+   * Adapted to handle various book cover designs and lighting conditions.
    */
   function preprocessImage(source, options = { invert: false }) {
     return new Promise((resolve, reject) => {
@@ -158,8 +183,16 @@ const OCR = (() => {
         canvas.height = h;
         const ctx = canvas.getContext('2d');
         
-        // Use browser-native filters for speed and quality
-        ctx.filter = `brightness(1.1) contrast(1.8) grayscale(1) ${options.invert ? 'invert(1)' : ''}`;
+        // Adaptive preprocessing:
+        // - Brightness boost for dark covers
+        // - Moderate contrast (not too aggressive)
+        // - Grayscale for consistency
+        // - Invert option for light text on dark backgrounds
+        const filterStr = options.invert 
+          ? `brightness(1.05) contrast(1.5) grayscale(1) invert(1)`
+          : `brightness(1.15) contrast(1.4) grayscale(1)`;
+        
+        ctx.filter = filterStr;
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, w, h);

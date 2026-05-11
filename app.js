@@ -196,12 +196,15 @@ const App = (() => {
       item.bookData = bookData;
 
       if (bookData) {
+        console.log('[App] Book found:', { title: bookData.title, source: bookData.source });
         // Fill editable fields from API (don't overwrite user edits)
         if (!item.editTitle  || item.editTitle  === ocrResult.title)  item.editTitle  = bookData.title  || item.editTitle;
         if (!item.editAuthor || item.editAuthor === ocrResult.author) item.editAuthor = bookData.author || item.editAuthor;
         if (!item.editDesc)   item.editDesc  = bookData.description || '';
         if (!item.editPages)  item.editPages = bookData.pages || '';
         if (!item.editYear)   item.editYear  = bookData.year  || '';
+      } else {
+        console.warn('[App] No book data found for:', searchTitle, searchAuthor);
       }
 
       updateItemProgress(item, 90);

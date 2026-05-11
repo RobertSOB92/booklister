@@ -31,75 +31,108 @@ export async function onRequestGet(context) {
 
     const searchRes = await fetch(searchUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; BookBot/1.0)',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept-Language': 'pl-PL,pl;q=0.9,en;q=0.5',
         'Accept': 'text/html,application/xhtml+xml',
+        'Referer': 'https://lubimyczytac.pl/',
       },
       cf: { cacheTtl: 3600, cacheEverything: true },
     });
 
     if (!searchRes.ok) {
+      console.log(`[LubimyCzytac] Search failed with status ${searchRes.status}`);
       return Response.json({ description: '', source: null }, { headers });
     }
 
     const searchHtml = await searchRes.text();
 
     // Extract first book slug — pattern: href="/ksiazka/12345/slug"
-    const linkMatch = searchHtml.match(/href="(\/ksiazka\/\d+\/[^"?]+)"/);
+    let linkMatch = searchHtml.match(/href="(\/ksiazka\/\d+\/[^"?]+)"/);
+    
+    // Fallback: try alternative patterns
     if (!linkMatch) {
-      return Response.json({ description: '', source: null, _debug_html: searchHtml.slice(0, 500) }, { headers });
+      linkMatch = searchHtml.match(/href="(\/ksiazka\/\d+)"/);
+    }
+    
+    if (!linkMatch) {
+      console.log('[LubimyCzytac] No book link found in search results');
+      return Response.json({ description: '', source: null }, { headers });
     }
 
     const bookPath = linkMatch[1];
     const bookUrl  = 'https://lubimyczytac.pl' + bookPath;
 
-    // ── Step 2: Fetch book page ────────────────────────────
-    const bookRes = await fetch(bookUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; BookBot/1.0)',
-        'Accept-Language': 'pl-PL,pl;q=0.9',
-      },
-      cf: { cacheTtl: 86400, cacheEverything: true },
-    });
+    // ── Step 2: Fetch book page with retry ────────────────
+    let bookRes = null;
+    let bookHtml = '';
+    
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        bookRes = await fetch(bookUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept-Language': 'pl-PL,pl;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml',
+            'Referer': searchUrl,
+          },
+          cf: { cacheTtl: 86400, cacheEverything: true },
+        });
 
-    if (!bookRes.ok) {
-      return Response.json({ description: '', source: bookUrl, _debug_status: bookRes.status }, { headers });
+        if (bookRes.ok) {
+          bookHtml = await bookRes.text();
+          break;
+        }
+      } catch (err) {
+        console.log(`[LubimyCzytac] Book fetch attempt ${attempt} failed:`, err.message);
+        if (attempt < 2) await new Promise(r => setTimeout(r, 500));
+      }
     }
 
-    const bookHtml = await bookRes.text();
+    if (!bookHtml) {
+      console.log('[LubimyCzytac] Could not fetch book page');
+      return Response.json({ description: '', source: bookUrl }, { headers });
+    }
 
-    // ── Step 3: Extract description ────────────────────────
+    // ── Step 3: Extract description (try multiple selectors) ──
     let description = '';
 
-    // Try: itemprop="description" block
-    const descMatch = bookHtml.match(/itemprop="description"[^>]*>([\s\S]*?)<\/div>/i);
-    if (descMatch) {
-      description = stripTags(descMatch[1]);
+    // Try 1: itemprop="description" block (primary)
+    let match = bookHtml.match(/itemprop="description"[^>]*>([\s\S]*?)<\/div>/i);
+    if (match) {
+      description = stripTags(match[1]);
     }
 
-    // Try: id="book-description"
+    // Try 2: id="book-description" or data-full-description
     if (!description) {
-      const bookDescMatch = bookHtml.match(/id="book-description"[^>]*>([\s\S]*?)<\/div>/i);
-      if (bookDescMatch) {
-        description = stripTags(bookDescMatch[1]);
+      match = bookHtml.match(/id="book-description"[^>]*>([\s\S]*?)<\/div>/i);
+      if (match) {
+        description = stripTags(match[1]);
       }
     }
 
-    // Fallback: collapse-content block
+    // Try 3: class="collapse-content" (collapsible section)
     if (!description) {
-      const collapseMatch = bookHtml.match(/class="collapse-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
-      if (collapseMatch) {
-        description = stripTags(collapseMatch[1]);
+      match = bookHtml.match(/class="collapse-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+      if (match) {
+        description = stripTags(match[1]);
       }
     }
 
-    // Fallback: data-full-description attribute
+    // Try 4: data-full-description attribute
     if (!description) {
-      const attrMatch = bookHtml.match(/data-full-description="([^"]+)"/i);
-      if (attrMatch) {
-        description = attrMatch[1].replace(/&#(\d+);/g, (_, n) =>
+      match = bookHtml.match(/data-full-description="([^"]+)"/i);
+      if (match) {
+        description = match[1].replace(/&#(\d+);/g, (_, n) =>
           String.fromCharCode(parseInt(n))
         );
+      }
+    }
+
+    // Try 5: Look for any paragraph-like content in book info section
+    if (!description) {
+      match = bookHtml.match(/<p[^>]*class="[^"]*description[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+      if (match) {
+        description = stripTags(match[1]);
       }
     }
 
@@ -111,6 +144,7 @@ export async function onRequestGet(context) {
     );
 
   } catch (err) {
+    console.error('[LubimyCzytac] Error:', err.message);
     // Never fail the whole request — just return empty
     return Response.json(
       { description: '', source: null, _error: err.message },

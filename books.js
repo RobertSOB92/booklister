@@ -82,6 +82,7 @@ const Books = (() => {
   /**
    * Calls /api/description — only works when deployed on CF Pages.
    * Falls back silently when running locally (file://).
+   * Includes timeout and error handling.
    */
   async function fetchLubimyCzytacDescription(title, author) {
     if (window.location.protocol === 'file:') return '';
@@ -89,12 +90,24 @@ const Books = (() => {
       const params = new URLSearchParams();
       if (title)  params.set('title',  title);
       if (author) params.set('author', author);
+      
       const res = await fetch(`/api/description?${params}`, {
-        signal: AbortSignal.timeout(12000),
+        signal: AbortSignal.timeout(14000), // Increased from 12s to allow retries
       });
-      if (!res.ok) return '';
+      
+      if (!res.ok) {
+        console.warn('[Books] LubimyCzytac returned status:', res.status);
+        return '';
+      }
+      
       const data = await res.json();
-      return (data.description || '').trim();
+      const desc = (data.description || '').trim();
+      
+      if (desc) {
+        console.log('[Books] LubimyCzytac description found:', desc.slice(0, 50) + '...');
+      }
+      
+      return desc;
     } catch (e) {
       console.warn('[Books] LubimyCzytac error:', e.message);
       return '';
@@ -112,13 +125,13 @@ const Books = (() => {
         '&maxResults=3&printType=books';
 
       // 1st try: Polish edition
-      let res = await fetch(base + '&langRestrict=pl', { signal: AbortSignal.timeout(9000) });
-      let data = res.ok ? await res.json() : {};
+      let res = await fetchWithRetry(base + '&langRestrict=pl', 9000);
+      let data = res ? res : {};
 
       // 2nd try: any language
       if (!data.items?.length) {
-        res = await fetch(base, { signal: AbortSignal.timeout(9000) });
-        data = res.ok ? await res.json() : {};
+        res = await fetchWithRetry(base, 9000);
+        data = res ? res : {};
       }
 
       if (!data.items?.length) return null;
@@ -138,15 +151,32 @@ const Books = (() => {
     }
   }
 
+  /** Fetch with timeout and basic retry logic */
+  async function fetchWithRetry(url, timeoutMs = 9000, maxAttempts = 2) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+        if (res.ok) return await res.json();
+        if (attempt < maxAttempts) await new Promise(r => setTimeout(r, 300));
+      } catch (e) {
+        if (attempt === maxAttempts) throw e;
+        console.warn(`[Books] Attempt ${attempt} failed, retrying...`, e.message);
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+    return null;
+  }
+
   /** Fetch full volume record to get complete description */
   async function fetchGoogleVolumeDescription(volumeId) {
     try {
       const url = `https://www.googleapis.com/books/v1/volumes/${volumeId}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(7000) });
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
       if (!res.ok) return '';
       const data = await res.json();
       return clean(data.volumeInfo?.description || '');
-    } catch {
+    } catch (e) {
+      console.warn('[Books] Volume description fetch failed:', e.message);
       return '';
     }
   }
@@ -183,14 +213,19 @@ const Books = (() => {
         parts.join('&') +
         '&limit=3&fields=key,title,author_name,first_publish_year,number_of_pages_median,isbn,publisher,cover_i,subject';
 
-      const res = await fetch(url, { signal: AbortSignal.timeout(9000) });
-      if (!res.ok) return null;
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) {
+        console.warn('[Books] OL search returned:', res.status);
+        return null;
+      }
       const data = await res.json();
       if (!data.docs?.length) return null;
 
       const doc = data.docs[0];
       let description = '';
-      if (doc.key) description = await olDescription(doc.key);
+      if (doc.key) {
+        description = await olDescription(doc.key);
+      }
 
       return {
         title:       fixEncoding(doc.title || ''),
@@ -224,30 +259,44 @@ const Books = (() => {
 
       // Try Polish edition first (language=pol)
       let url = `https://openlibrary.org/search.json?${parts.join('&')}&language=pol&limit=1&fields=key`;
-      let res = await fetch(url, { signal: AbortSignal.timeout(7000) });
+      let res = await fetch(url, { signal: AbortSignal.timeout(8000) });
       let data = res.ok ? await res.json() : {};
 
       // Fallback: any language
       if (!data.docs?.length) {
         url = `https://openlibrary.org/search.json?${parts.join('&')}&limit=1&fields=key`;
-        res = await fetch(url, { signal: AbortSignal.timeout(7000) });
+        res = await fetch(url, { signal: AbortSignal.timeout(8000) });
         data = res.ok ? await res.json() : {};
       }
 
       const key = data.docs?.[0]?.key;
-      if (!key) return '';
+      if (!key) {
+        console.warn('[Books] No OL key found for', title, author);
+        return '';
+      }
       return await olDescription(key);
-    } catch { return ''; }
+    } catch (e) {
+      console.warn('[Books] OL description-only fetch error:', e.message);
+      return '';
+    }
   }
 
   async function olDescription(workKey) {
     try {
       const res = await fetch(`https://openlibrary.org${workKey}.json`,
-        { signal: AbortSignal.timeout(8000) });
-      if (!res.ok) return '';
+        { signal: AbortSignal.timeout(9000) });
+      if (!res.ok) {
+        console.warn('[Books] OL description endpoint returned:', res.status);
+        return '';
+      }
       const data = await res.json();
       const d = data.description;
       const raw = typeof d === 'string' ? d : (d?.value || '');
+      
+      if (raw) {
+        console.log('[Books] OL description found:', raw.slice(0, 50) + '...');
+      }
+      
       return clean(raw);
     } catch (e) {
       console.warn('[Books] OL description error:', e.message);
