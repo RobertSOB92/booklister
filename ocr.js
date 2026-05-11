@@ -34,36 +34,46 @@ const OCR = (() => {
 
   /**
    * Run OCR on an image file or blob
-   * @param {File|Blob|string} source
-   * @param {function} onProgress
-   * @returns {Promise<{rawText: string, title: string, author: string}>}
+   * Dual-pass: Normal + Inverted (for light text on dark covers)
    */
   async function recognize(source, onProgress) {
-    // Preprocess image first for better OCR accuracy on stylized covers
-    let processedSource = source;
-    try {
-      processedSource = await preprocessImage(source);
-    } catch (e) {
-      console.warn('[OCR] Preprocessing failed, using original:', e.message);
-    }
-
     const w = await getWorker();
-    const result = await w.recognize(processedSource);
-    const rawText = result.data.text || '';
+    
+    // Pass 1: Standard high-contrast
+    const imgNormal = await preprocessImage(source, { invert: false });
+    const resNormal = await w.recognize(imgNormal);
+    const textNormal = resNormal.data.text || '';
+    
+    if (onProgress) onProgress(0.4);
+
+    // Pass 2: Inverted (Crucial for Harry Potter and dark covers)
+    const imgInverted = await preprocessImage(source, { invert: true });
+    const resInverted = await w.recognize(imgInverted);
+    const textInverted = resInverted.data.text || '';
 
     if (onProgress) onProgress(0.8);
 
-    const parsed = parseBookText(rawText);
-    return { rawText, ...parsed };
+    // Pick the best text (the one that looks more like a book title)
+    const parsedNormal = parseBookText(textNormal);
+    const parsedInverted = parseBookText(textInverted);
+    
+    // Heuristic: pick the one that found a more "solid" title or specific keywords
+    const scoreN = parsedNormal.title.length + (parsedNormal.author ? 10 : 0);
+    const scoreI = parsedInverted.title.length + (parsedInverted.author ? 10 : 0);
+    
+    const useInverted = (scoreI > scoreN + 2) || 
+                        (/harry|potter/i.test(textInverted) && !/harry|potter/i.test(textNormal));
+
+    const finalResult = useInverted ? parsedInverted : parsedNormal;
+    const rawText = `[PASS 1]\n${textNormal}\n\n[PASS 2 (INVERTED)]\n${textInverted}`;
+
+    console.log('[OCR] Results:', { normal: parsedNormal, inverted: parsedInverted, picked: useInverted ? 'inverted' : 'normal' });
+
+    return { rawText, ...finalResult };
   }
 
   /**
    * Parse raw OCR text → best guess for title and author.
-   * Heuristics for Polish book covers:
-   *  - Author is typically SMALL text (first 1-3 lines) or contains known patterns
-   *  - Title is typically LARGE/BOLD text (often all-caps or mid-section)
-   *  - Lines with numbers/ISBNs are ignored
-   *  - Lines shorter than 3 chars are ignored
    */
   function parseBookText(raw) {
     const lines = raw
@@ -73,7 +83,7 @@ const OCR = (() => {
       // Filter out garbage lines like "kk i i :" or "......."
       .filter(l => {
         const letters = l.replace(/[^a-złóśćąęźżńA-ZŁÓŚĆĄĘŹŻŃ]/g, '').length;
-        return letters / l.length > 0.4; // At least 40% of the line must be letters
+        return letters / l.length > 0.35; // At least 35% of the line must be letters
       })
       .filter(l => !/^\d[\d\s\-]+$/.test(l))
       .filter(l => !/isbn|ean|www\.|http/i.test(l))
@@ -81,8 +91,6 @@ const OCR = (() => {
       .slice(0, 15);
 
     if (lines.length === 0) return { title: '', author: '' };
-
-    console.log('[OCR] Candidate lines:', lines);
 
     const authorKeywords = /^(autor[:\s]|by[:\s]|napisał|napisała|tekst[:\s])/i;
     let author = '';
@@ -98,11 +106,10 @@ const OCR = (() => {
       }
     }
 
-    // 2. Author heuristic (usually top of the cover, shorter lines)
+    // 2. Author heuristic (usually top/bottom of the cover, shorter lines)
     if (!author) {
-      for (let i = 0; i < Math.min(lines.length, 4); i++) {
+      for (let i = 0; i < Math.min(lines.length, 5); i++) {
         const words = lines[i].split(/\s+/);
-        // Author usually has 2-3 words, starting with caps
         const isProperCase = words.every(w => /^[A-ZŁÓŚĆĄĘŹŻŃ][a-złóśćąęźżńA-ZŁÓŚĆĄĘŹŻŃ]+\.?$/.test(w));
         if (isProperCase && words.length >= 2 && words.length <= 3) {
           author = lines[i];
@@ -120,7 +127,7 @@ const OCR = (() => {
       const isAllCaps = l === l.toUpperCase() && l.length > 5;
       const hasHarry = /harry|potter/i.test(l);
       // Score: weight length, all-caps, and specific patterns
-      const score = l.length * (isAllCaps ? 2.0 : 1.0) * (hasHarry ? 5.0 : 1.0);
+      const score = l.length * (isAllCaps ? 2.0 : 1.0) * (hasHarry ? 10.0 : 1.0);
       
       if (score > bestTitleScore) {
         bestTitleScore = score;
@@ -134,11 +141,14 @@ const OCR = (() => {
     };
   }
 
-  function preprocessImage(source) {
+  /**
+   * Canvas-based image preprocessing with filters.
+   */
+  function preprocessImage(source, options = { invert: false }) {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
-        const MAX = 2500;
+        const MAX = 2048;
         const scale = Math.min(MAX / Math.max(img.width, img.height), 1);
         const w = Math.round(img.width * scale);
         const h = Math.round(img.height * scale);
@@ -147,30 +157,25 @@ const OCR = (() => {
         canvas.width  = w;
         canvas.height = h;
         const ctx = canvas.getContext('2d');
+        
+        // Use browser-native filters for speed and quality
+        ctx.filter = `brightness(1.1) contrast(1.8) grayscale(1) ${options.invert ? 'invert(1)' : ''}`;
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, w, h);
 
-        const imgData = ctx.getImageData(0, 0, w, h);
-        const d = imgData.data;
-
-        // Soft contrast enhancement instead of hard binarization
-        for (let i = 0; i < d.length; i += 4) {
-          let r = d[i], g = d[i+1], b = d[i+2];
-          let gray = 0.299 * r + 0.587 * g + 0.114 * b;
-          
-          // Increase contrast (gamma-like)
-          let v = gray;
-          if (v < 128) v = (v * v) / 128; // Darker darks
-          else v = 255 - ((255 - v) * (255 - v) / 128); // Brighter brights
-          
-          d[i] = d[i+1] = d[i+2] = Math.max(0, Math.min(255, v));
-        }
-
-        ctx.putImageData(imgData, 0, 0);
         canvas.toBlob(b => b ? resolve(b) : reject(), 'image/png');
+        if (img._revokeUrl) URL.revokeObjectURL(img._revokeUrl);
       };
-      img.src = (source instanceof File || source instanceof Blob) ? URL.createObjectURL(source) : source;
+      img.onerror = () => reject();
+      
+      if (source instanceof File || source instanceof Blob) {
+        const url = URL.createObjectURL(source);
+        img._revokeUrl = url;
+        img.src = url;
+      } else {
+        img.src = source;
+      }
     });
   }
 
