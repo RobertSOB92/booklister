@@ -47,7 +47,7 @@ export async function onRequestGet(context) {
     // Extract first book slug — pattern: href="/ksiazka/12345/slug"
     const linkMatch = searchHtml.match(/href="(\/ksiazka\/\d+\/[^"?]+)"/);
     if (!linkMatch) {
-      return Response.json({ description: '', source: null }, { headers });
+      return Response.json({ description: '', source: null, _debug_html: searchHtml.slice(0, 500) }, { headers });
     }
 
     const bookPath = linkMatch[1];
@@ -63,7 +63,7 @@ export async function onRequestGet(context) {
     });
 
     if (!bookRes.ok) {
-      return Response.json({ description: '', source: bookUrl }, { headers });
+      return Response.json({ description: '', source: bookUrl, _debug_status: bookRes.status }, { headers });
     }
 
     const bookHtml = await bookRes.text();
