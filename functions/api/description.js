@@ -72,18 +72,22 @@ export async function onRequestGet(context) {
     let description = '';
 
     // Try: itemprop="description" block
-    const descMatch = bookHtml.match(
-      /itemprop="description"[^>]*>([\s\S]*?)<\/div>/i
-    );
+    const descMatch = bookHtml.match(/itemprop="description"[^>]*>([\s\S]*?)<\/div>/i);
     if (descMatch) {
       description = stripTags(descMatch[1]);
     }
 
+    // Try: id="book-description"
+    if (!description) {
+      const bookDescMatch = bookHtml.match(/id="book-description"[^>]*>([\s\S]*?)<\/div>/i);
+      if (bookDescMatch) {
+        description = stripTags(bookDescMatch[1]);
+      }
+    }
+
     // Fallback: collapse-content block
     if (!description) {
-      const collapseMatch = bookHtml.match(
-        /class="collapse-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i
-      );
+      const collapseMatch = bookHtml.match(/class="collapse-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
       if (collapseMatch) {
         description = stripTags(collapseMatch[1]);
       }

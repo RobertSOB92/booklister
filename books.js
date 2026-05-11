@@ -310,10 +310,24 @@ const Books = (() => {
     return (ids.find(i => i.type === 'ISBN_13') || ids.find(i => i.type === 'ISBN_10'))?.identifier || '';
   }
 
+  const PL_MOJIBAKE = {
+    'Ä…': 'ą', 'Ä‡': 'ć', 'Ä™': 'ę', 'Ĺ‚': 'ł', 'Ĺ„': 'ń', 'Ăł': 'ó', 'Ĺ›': 'ś', 'Ĺş': 'ź', 'Ĺź': 'ż',
+    'Ä„': 'Ą', 'Ä†': 'Ć', 'Ä': 'Ę', 'Ĺ': 'Ł', 'Ĺƒ': 'Ń', 'Ă“': 'Ó', 'Ĺš': 'Ś', 'Ĺą': 'Ź', 'Ĺť': 'Ż',
+    'RafaĹ ': 'Rafał ', 'KSIÄĹťKA': 'KSIĄŻKA'
+  };
+
   /** Fix UTF-8 bytes mistakenly decoded as Latin-1 (common Open Library issue) */
   function fixEncoding(str) {
     if (!str) return str;
-    try { return decodeURIComponent(escape(str)); } catch { return str; }
+    try { 
+      return decodeURIComponent(escape(str)); 
+    } catch { 
+      let s = str;
+      for (const [bad, good] of Object.entries(PL_MOJIBAKE)) {
+        s = s.split(bad).join(good);
+      }
+      return s;
+    }
   }
 
   function clean(text) {
