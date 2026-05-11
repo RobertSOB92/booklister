@@ -1,7 +1,0 @@
-# Files excluded from static asset serving
-_worker.js
-wrangler.toml
-functions/
-.git/
-.wrangler/
-*.toml
