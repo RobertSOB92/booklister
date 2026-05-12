@@ -35,6 +35,8 @@ Otwórz `index.html` w przeglądarce (LubimyCzytać nie działa lokalnie — wym
 - **Lepszy scoring tytułów**: zamiast wykładniczego — liniowy, z bonusami za popularne słowa
 - **Rozpoznawanie imion autorów**: akceptuje mieszane case'i, 1-4 wyrazowe linie
 - **Adaptacyjne preprocessingowanie**: zbalansowana jasność i kontrast dla różnych okładek
+- **ISBN-first**: jeśli OCR wykryje poprawny ISBN-10/13, wyszukiwanie zaczyna od ISBN (najwyższa trafność)
+- **Tryb kandydatów**: aplikacja pokazuje kilka dopasowań książki, które możesz ręcznie przełączyć jednym kliknięciem
 
 ### Pobieranie Opisów — Niezawodność
 - **Retry mechanism**: automatyczne ponowne próby (2x) dla Google Books i Open Library

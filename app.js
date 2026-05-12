@@ -24,9 +24,11 @@ const App = (() => {
       progress:    0-100,
       rawText:     string,
       ocrTitle:    string,
-      ocrAuthor:   string,
-      bookData:    object|null,
-      editTitle:   string,
+       ocrAuthor:   string,
+       bookData:    object|null,
+       candidates:  object[],
+       detectedIsbn:string,
+       editTitle:   string,
       editAuthor:  string,
       editDesc:    string,
       editPages:   string,
@@ -137,6 +139,8 @@ const App = (() => {
       ocrTitle: '',
       ocrAuthor: '',
       bookData: null,
+      candidates: [],
+      detectedIsbn: '',
       editTitle: '',
       editAuthor: '',
       editDesc: '',
@@ -192,8 +196,11 @@ const App = (() => {
       const searchTitle  = item.editTitle  || ocrResult.title;
       const searchAuthor = item.editAuthor || ocrResult.author;
 
-      const bookData = await Books.search(searchTitle, searchAuthor, item.rawText);
+      const lookup = await Books.searchWithCandidates(searchTitle, searchAuthor, item.rawText);
+      const bookData = lookup.book;
       item.bookData = bookData;
+      item.candidates = lookup.candidates || [];
+      item.detectedIsbn = lookup.detectedIsbn || '';
 
       if (bookData) {
         console.log('[App] Book found:', { title: bookData.title, source: bookData.source });
@@ -372,10 +379,43 @@ const App = (() => {
     const book = item.bookData || {};
     const formatted = generateDescription(item);
     item.formattedText = formatted;
+    const candidates = Array.isArray(item.candidates) ? item.candidates : [];
+    const hasCandidates = candidates.length > 1;
+    const selectedCandidateIndex = candidates.findIndex(c =>
+      c.title === book.title &&
+      c.author === book.author &&
+      (c.sourceUrl || '') === (book.sourceUrl || '')
+    );
 
     bodyEl.style.display = 'block';
     bodyEl.innerHTML = `
       <div class="section-title">Dane książki</div>
+
+      ${item.detectedIsbn ? `
+        <div class="search-hint">🔢 Wykryto ISBN z OCR: <strong>${escHtml(item.detectedIsbn)}</strong></div>
+      ` : ''}
+
+      ${hasCandidates ? `
+        <div class="candidate-box">
+          <div class="field-label">Dopasowanie (wybierz właściwą książkę)</div>
+          <div class="candidate-row">
+            <select
+              id="candidate-select-${item.id}"
+              class="field-input"
+              onchange="App.selectCandidate(${item.id}, this.value)"
+            >
+              ${candidates.map((c, idx) => `
+                <option value="${idx}" ${idx === selectedCandidateIndex ? 'selected' : ''}>
+                  ${escHtml(c.title || 'Bez tytułu')} — ${escHtml(c.author || 'Brak autora')} (${escHtml(c.source || 'API')})
+                </option>
+              `).join('')}
+            </select>
+            <button class="btn btn-ghost" type="button" onclick="App.selectCandidate(${item.id}, document.getElementById('candidate-select-${item.id}').value)">
+              ✅ Zastosuj
+            </button>
+          </div>
+        </div>
+      ` : ''}
 
       <div class="card-fields">
         <div>
@@ -595,8 +635,11 @@ const App = (() => {
       const bodyEl = document.getElementById(`card-body-${id}`);
       if (bodyEl) bodyEl.style.display = 'none';
 
-      const bookData = await Books.search(searchTitle, searchAuthor, item.rawText);
+      const lookup = await Books.searchWithCandidates(searchTitle, searchAuthor, item.rawText);
+      const bookData = lookup.book;
       item.bookData = bookData;
+      item.candidates = lookup.candidates || [];
+      item.detectedIsbn = lookup.detectedIsbn || item.detectedIsbn || '';
 
       if (bookData) {
         if (!item.editDesc)  item.editDesc  = bookData.description || '';
@@ -612,6 +655,41 @@ const App = (() => {
       renderCardBody(item);
     } catch (err) {
       item.error = err.message;
+      updateItemStatus(item, 'error', 0, '');
+      renderCardBody(item);
+    }
+    renderStats();
+  }
+
+  async function selectCandidate(id, idxValue) {
+    const item = findItem(id);
+    if (!item || !Array.isArray(item.candidates) || item.candidates.length === 0) return;
+
+    const idx = Number(idxValue);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= item.candidates.length) return;
+
+    try {
+      updateItemStatus(item, 'searching', 70, 'Pobieranie wybranego dopasowania…');
+      const picked = item.candidates[idx];
+      const hydrated = await Books.hydrateCandidate(
+        picked,
+        item.editTitle || item.ocrTitle,
+        item.editAuthor || item.ocrAuthor
+      );
+      item.bookData = hydrated || picked;
+
+      item.editTitle = item.bookData.title || item.editTitle;
+      item.editAuthor = item.bookData.author || item.editAuthor;
+      item.editYear = item.bookData.year || item.editYear;
+      item.editPages = item.bookData.pages || item.editPages;
+      item.editDesc = item.bookData.description || item.editDesc;
+
+      item.formattedText = generateDescription(item);
+      updateItemStatus(item, 'success', 100, '');
+      renderCardBody(item);
+      showToast('✅ Zastosowano wybrany wynik', 'success');
+    } catch (err) {
+      item.error = err.message || 'Błąd wyboru dopasowania';
       updateItemStatus(item, 'error', 0, '');
       renderCardBody(item);
     }
@@ -673,6 +751,7 @@ const App = (() => {
     removeItem,
     retryItem,
     searchOnly,
+    selectCandidate,
     copySingle,
     onFieldChange,
   };

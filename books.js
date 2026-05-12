@@ -4,10 +4,10 @@
  * Fallback: Open Library API
  *
  * Search strategy (in order):
- *  1. Google Books — free-form "title author"
- *  2. Google Books — title only
- *  3. Google Books — good words extracted from raw OCR text
- *  4. Open Library — free-form title+author
+ *  1. ISBN-first from OCR text
+ *  2. Google Books candidates (title+author / title / OCR words)
+ *  3. Open Library candidates
+ *  4. Candidate ranking + manual selection in UI
  */
 
 const Books = (() => {
@@ -16,67 +16,113 @@ const Books = (() => {
   /* ── Public API ───────────────────────────────────────── */
 
   /**
+   * Backward-compatible single-result API.
    * @param {string} title
    * @param {string} author
-   * @param {string} [rawText]  raw OCR dump used as last-resort fallback
+   * @param {string} [rawText]
    */
   async function search(title, author, rawText = '') {
+    const { book } = await searchWithCandidates(title, author, rawText);
+    return book;
+  }
+
+  /**
+   * ISBN-first lookup + ranked candidates from multiple sources.
+   * @param {string} title
+   * @param {string} author
+   * @param {string} [rawText]
+   * @returns {Promise<{book: object|null, candidates: object[], detectedIsbn: string}>}
+   */
+  async function searchWithCandidates(title, author, rawText = '') {
     const primaryQ = buildQuery(title, author);
-    const cacheKey = (primaryQ || rawText).toLowerCase().trim().slice(0, 120);
+    const cacheKey = (primaryQ || rawText).toLowerCase().trim().slice(0, 180);
     if (cache.has(cacheKey)) return cache.get(cacheKey);
 
-    let result = null;
+    const candidates = [];
+    const seen = new Set();
+    const addCandidate = (book, reason = '') => {
+      if (!book || !book.title) return;
+      const key = [
+        normalizeWords(book.title).join(' '),
+        normalizeWords(book.author).join(' '),
+        (book.isbn || '').replace(/[^0-9X]/gi, '')
+      ].join('|');
+      if (seen.has(key)) return;
+      seen.add(key);
+      candidates.push({
+        ...book,
+        _reason: reason,
+      });
+    };
 
-    // 1 — free-form "title author"
+    // 1) ISBN-first from OCR dump
+    const isbnCandidates = extractIsbnCandidates(rawText);
+    let detectedIsbn = isbnCandidates[0] || '';
+    if (isbnCandidates.length) {
+      for (const isbn of isbnCandidates.slice(0, 2)) {
+        const gb = await searchGoogleByIsbn(isbn);
+        if (gb) addCandidate(gb, `ISBN ${isbn} (Google)`);
+        const ol = await searchOpenLibraryByIsbn(isbn);
+        if (ol) addCandidate(ol, `ISBN ${isbn} (Open Library)`);
+      }
+    }
+
+    // 2) Query-based candidates
     if (primaryQ) {
-      result = await googleFreeForm(primaryQ);
-      if (result && !validateResult(title, author, result)) {
-        console.warn('[Books] Rejected (low similarity):', result.title);
-        result = null;
-      }
+      const gb = await googleCandidates(primaryQ, 5);
+      gb.forEach(b => addCandidate(b, 'Google: tytuł + autor'));
     }
-
-    // 2 — title only (drop possibly-garbage author)
-    if (!result && title && title.trim()) {
-      result = await googleFreeForm(title.trim());
-      if (result && !validateResult(title, '', result)) result = null;
+    if (title && title.trim()) {
+      const gbTitle = await googleCandidates(title.trim(), 4);
+      gbTitle.forEach(b => addCandidate(b, 'Google: sam tytuł'));
     }
-
-    // 3 — good words from raw OCR (skip validation — OCR is garbage anyway)
-    if (!result && rawText) {
-      const words = goodOcrWords(rawText);
-      console.log('[Books] OCR good words:', words);
-      if (words.length >= 2) {
-        result = await googleFreeForm(words.join(' '));
-        // accept any result here since we trust the API more than our OCR
-      }
-    }
-
-    // 4 — Open Library fallback
-    if (!result && primaryQ) {
-      result = await searchOpenLibrary(title, author);
-      if (result && !validateResult(title, author, result)) result = null;
-    }
-
-    // 5 — Open Library with raw OCR words
-    if (!result && rawText) {
+    if (rawText) {
       const words = goodOcrWords(rawText);
       if (words.length >= 2) {
-        result = await searchOpenLibrary(words.slice(0, 4).join(' '), '');
+        const gbWords = await googleCandidates(words.join(' '), 4);
+        gbWords.forEach(b => addCandidate(b, 'Google: słowa z OCR'));
       }
     }
 
-    if (result) {
-      const descTitle  = result.title  || title;
-      const descAuthor = result.author || author;
-      result.description = await ensurePolishDescription(
-        result.description || '',
-        descTitle,
-        descAuthor
+    const ol1 = await searchOpenLibraryCandidates(title, author, 4);
+    ol1.forEach(b => addCandidate(b, 'Open Library'));
+
+    if (rawText) {
+      const words = goodOcrWords(rawText);
+      if (words.length >= 2) {
+        const ol2 = await searchOpenLibraryCandidates(words.slice(0, 4).join(' '), '', 3);
+        ol2.forEach(b => addCandidate(b, 'Open Library: słowa z OCR'));
+      }
+    }
+
+    // 3) Rank and pick best
+    const ranked = candidates
+      .map(c => ({
+        ...c,
+        _score: scoreBookCandidate(title, author, c.title, c.author),
+      }))
+      .sort((a, b) => b._score - a._score);
+
+    let book = ranked[0] || null;
+    if (book && !validateResult(title, author, book) && ranked[1]) {
+      book = ranked[1];
+    }
+    if (book) {
+      book.description = await ensurePolishDescription(
+        book.description || '',
+        book.title || title,
+        book.author || author
       );
-      cache.set(cacheKey, result);
     }
-    return result;
+
+    const payload = {
+      book,
+      candidates: ranked.slice(0, 6).map(({ _score, ...rest }) => rest),
+      detectedIsbn,
+    };
+
+    cache.set(cacheKey, payload);
+    return payload;
   }
 
   /* ── Polish Wikipedia description ─────────────────────── */
@@ -176,42 +222,42 @@ const Books = (() => {
     }
   }
 
-  /* ── Google Books (free-form) ─────────────────────────── */
+  /* ── Google Books (free-form + ISBN) ───────────────────── */
 
-  async function googleFreeForm(query) {
-    if (!query || !query.trim()) return null;
+  async function googleCandidates(query, limit = 5) {
+    if (!query || !query.trim()) return [];
     try {
+      const maxResults = Math.min(Math.max(limit, 1), 10);
       const base =
         'https://www.googleapis.com/books/v1/volumes' +
         `?q=${encodeURIComponent(query.trim())}` +
-        '&maxResults=8&printType=books';
+        `&maxResults=${maxResults}&printType=books`;
 
-      // 1st try: Polish edition
-      let res = await fetchWithRetry(base + '&langRestrict=pl', 9000);
-      let data = res ? res : {};
-
-      // 2nd try: any language
-      if (!data.items?.length) {
-        res = await fetchWithRetry(base, 9000);
-        data = res ? res : {};
+      let data = await fetchWithRetry(base + '&langRestrict=pl', 9000);
+      if (!data?.items?.length) {
+        data = await fetchWithRetry(base, 9000);
       }
+      if (!data?.items?.length) return [];
 
-      if (!data.items?.length) return null;
-
-      const gbItem = chooseBestGoogleItem(query, '', data.items);
-      if (!gbItem) return null;
-      const result = normalizeGoogleBook(gbItem);
-
-      // Search results often omit description — fetch full volume if needed
-      if (!result.description && gbItem.id) {
-        result.description = await fetchGoogleVolumeDescription(gbItem.id);
-      }
-
-      return result;
+      return data.items
+        .map(normalizeGoogleBook)
+        .filter(b => b.title)
+        .slice(0, maxResults);
     } catch (e) {
       console.warn('[Books] Google error:', e.message);
-      return null;
+      return [];
     }
+  }
+
+  async function googleFreeForm(query) {
+    const list = await googleCandidates(query, 5);
+    return list[0] || null;
+  }
+
+  async function searchGoogleByIsbn(isbn) {
+    if (!isbn) return null;
+    const list = await googleCandidates(`isbn:${isbn}`, 3);
+    return list[0] || null;
   }
 
   /** Fetch with timeout and basic retry logic */
@@ -265,52 +311,76 @@ const Books = (() => {
   /* ── Open Library ─────────────────────────────────────── */
 
   async function searchOpenLibrary(title, author) {
+    const list = await searchOpenLibraryCandidates(title, author, 3);
+    return list[0] || null;
+  }
+
+  async function searchOpenLibraryCandidates(title, author, limit = 4) {
     try {
       const parts = [];
       if (title)  parts.push(`title=${encodeURIComponent(title)}`);
       if (author) parts.push(`author=${encodeURIComponent(author)}`);
-      if (!parts.length) return null;
+      if (!parts.length) return [];
 
       const url =
         'https://openlibrary.org/search.json?' +
         parts.join('&') +
-        '&limit=3&fields=key,title,author_name,first_publish_year,number_of_pages_median,isbn,publisher,cover_i,subject';
+        `&limit=${Math.min(Math.max(limit, 1), 10)}` +
+        '&fields=key,title,author_name,first_publish_year,number_of_pages_median,isbn,publisher,cover_i,subject';
 
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
       if (!res.ok) {
         console.warn('[Books] OL search returned:', res.status);
-        return null;
+        return [];
       }
       const data = await res.json();
-      if (!data.docs?.length) return null;
+      if (!data.docs?.length) return [];
 
-      const doc = chooseBestOpenLibraryDoc(title, author, data.docs);
-      if (!doc) return null;
-      let description = '';
-      if (doc.key) {
-        description = await olDescription(doc.key);
-      }
-
-      return {
-        title:       fixEncoding(doc.title || ''),
-        author:      fixEncoding((doc.author_name || []).join(', ')),
-        description: clean(description),
-        publisher:   fixEncoding((doc.publisher || [])[0] || ''),
-        year:        String(doc.first_publish_year || ''),
-        isbn:        (doc.isbn || [])[0] || '',
-        pages:       doc.number_of_pages_median ? String(doc.number_of_pages_median) : '',
-        language:    '',
-        categories:  fixEncoding((doc.subject || []).slice(0, 3).join(', ')),
-        coverUrl:    doc.cover_i
-          ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`
-          : '',
-        sourceUrl:   `https://openlibrary.org${doc.key}`,
-        source:      'Open Library',
-      };
+      return data.docs
+        .map(normalizeOpenLibraryDoc)
+        .filter(d => d.title)
+        .slice(0, limit);
     } catch (e) {
       console.warn('[Books] Open Library error:', e.message);
+      return [];
+    }
+  }
+
+  async function searchOpenLibraryByIsbn(isbn) {
+    try {
+      if (!isbn) return null;
+      const url =
+        `https://openlibrary.org/search.json?isbn=${encodeURIComponent(isbn)}` +
+        '&limit=1&fields=key,title,author_name,first_publish_year,number_of_pages_median,isbn,publisher,cover_i,subject';
+      const res = await fetch(url, { signal: AbortSignal.timeout(9000) });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const doc = data.docs?.[0];
+      if (!doc) return null;
+      return normalizeOpenLibraryDoc(doc);
+    } catch (e) {
+      console.warn('[Books] Open Library ISBN error:', e.message);
       return null;
     }
+  }
+
+  function normalizeOpenLibraryDoc(doc) {
+    return {
+      title:       fixEncoding(doc.title || ''),
+      author:      fixEncoding((doc.author_name || []).join(', ')),
+      description: '',
+      publisher:   fixEncoding((doc.publisher || [])[0] || ''),
+      year:        String(doc.first_publish_year || ''),
+      isbn:        (doc.isbn || [])[0] || '',
+      pages:       doc.number_of_pages_median ? String(doc.number_of_pages_median) : '',
+      language:    '',
+      categories:  fixEncoding((doc.subject || []).slice(0, 3).join(', ')),
+      coverUrl:    doc.cover_i
+        ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg`
+        : '',
+      sourceUrl:   doc.key ? `https://openlibrary.org${doc.key}` : '',
+      source:      'Open Library',
+    };
   }
 
   /** Fetch description from OL even if Google Books found the book */
@@ -515,6 +585,65 @@ const Books = (() => {
       .slice(0, 8);  // take first 8 good words
   }
 
+  function extractIsbnCandidates(rawText) {
+    if (!rawText) return [];
+    const chunks = rawText.match(/(?:97[89][\d\-\s]{10,18}|\d[\d\-\s]{8,15}[0-9Xx])/g) || [];
+    const out = [];
+    const seen = new Set();
+
+    for (const chunk of chunks) {
+      const compact = chunk.replace(/[^0-9Xx]/g, '').toUpperCase();
+      if (compact.length === 13 && isValidIsbn13(compact)) {
+        if (!seen.has(compact)) {
+          seen.add(compact);
+          out.push(compact);
+        }
+      } else if (compact.length === 10 && isValidIsbn10(compact)) {
+        if (!seen.has(compact)) {
+          seen.add(compact);
+          out.push(compact);
+        }
+      }
+    }
+
+    if (out.length) {
+      console.log('[Books] ISBN from OCR:', out);
+    }
+    return out;
+  }
+
+  function isValidIsbn13(v) {
+    if (!/^\d{13}$/.test(v)) return false;
+    let sum = 0;
+    for (let i = 0; i < 12; i++) {
+      sum += Number(v[i]) * (i % 2 === 0 ? 1 : 3);
+    }
+    const check = (10 - (sum % 10)) % 10;
+    return check === Number(v[12]);
+  }
+
+  function isValidIsbn10(v) {
+    if (!/^\d{9}[\dX]$/.test(v)) return false;
+    let sum = 0;
+    for (let i = 0; i < 9; i++) {
+      sum += Number(v[i]) * (10 - i);
+    }
+    const last = v[9] === 'X' ? 10 : Number(v[9]);
+    sum += last;
+    return sum % 11 === 0;
+  }
+
+  async function hydrateCandidate(candidate, searchTitle = '', searchAuthor = '') {
+    if (!candidate) return null;
+    const out = { ...candidate };
+    out.description = await ensurePolishDescription(
+      out.description || '',
+      out.title || searchTitle,
+      out.author || searchAuthor
+    );
+    return out;
+  }
+
   /* ── Helpers ──────────────────────────────────────────── */
 
   function buildQuery(title, author) {
@@ -554,5 +683,9 @@ const Books = (() => {
       .slice(0, 800));
   }
 
-  return { search };
+  return {
+    search,
+    searchWithCandidates,
+    hydrateCandidate,
+  };
 })();
