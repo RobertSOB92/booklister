@@ -3,3 +3,6 @@ name = "booklister"
 pages_build_output_dir = "."
 compatibility_date = "2026-05-11"
 compatibility_flags = ["nodejs_compat"]
+
+[ai]
+binding = "AI"
