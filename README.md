@@ -40,6 +40,7 @@ Otwórz `index.html` w przeglądarce (LubimyCzytać nie działa lokalnie — wym
 - **Retry mechanism**: automatyczne ponowne próby (2x) dla Google Books i Open Library
 - **Dłuższe timeout'y**: lepsze dla API międzynarodowych
 - **Lepsze scrapowanie LubimyCzytać**: 5 strategii wyszukiwania opisu + retry + proper headers
+- **Preferowanie opisu po polsku**: przy opisie po angielsku aplikacja automatycznie próbuje podmienić na polski (Wikipedia PL/LubimyCzytać/OL)
 - **Lepsza obsługa błędów**: szczegółowe logowanie w konsoli (F12) dla diagnostyki
 
 ### Debugowanie

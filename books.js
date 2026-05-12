@@ -67,15 +67,13 @@ const Books = (() => {
     }
 
     if (result) {
-      // Description priority: Wikipedia (PL) → LubimyCzytac → OL
-      if (!result.description) {
-        const descTitle  = result.title  || title;
-        const descAuthor = result.author || author;
-        result.description =
-          await fetchWikipediaDescription(descTitle, descAuthor) ||
-          await fetchLubimyCzytacDescription(descTitle, descAuthor) ||
-          await fetchOLDescriptionOnly(descTitle, descAuthor);
-      }
+      const descTitle  = result.title  || title;
+      const descAuthor = result.author || author;
+      result.description = await ensurePolishDescription(
+        result.description || '',
+        descTitle,
+        descAuthor
+      );
       cache.set(cacheKey, result);
     }
     return result;
@@ -186,7 +184,7 @@ const Books = (() => {
       const base =
         'https://www.googleapis.com/books/v1/volumes' +
         `?q=${encodeURIComponent(query.trim())}` +
-        '&maxResults=3&printType=books';
+        '&maxResults=8&printType=books';
 
       // 1st try: Polish edition
       let res = await fetchWithRetry(base + '&langRestrict=pl', 9000);
@@ -200,7 +198,8 @@ const Books = (() => {
 
       if (!data.items?.length) return null;
 
-      const gbItem = data.items[0];
+      const gbItem = chooseBestGoogleItem(query, '', data.items);
+      if (!gbItem) return null;
       const result = normalizeGoogleBook(gbItem);
 
       // Search results often omit description — fetch full volume if needed
@@ -285,7 +284,8 @@ const Books = (() => {
       const data = await res.json();
       if (!data.docs?.length) return null;
 
-      const doc = data.docs[0];
+      const doc = chooseBestOpenLibraryDoc(title, author, data.docs);
+      if (!doc) return null;
       let description = '';
       if (doc.key) {
         description = await olDescription(doc.key);
@@ -391,6 +391,109 @@ const Books = (() => {
     const ratio = matches / sq.length;
     console.log(`[Books] Similarity ${Math.round(ratio * 100)}% — "${result.title}"`);
     return ratio >= 0.20;
+  }
+
+  async function ensurePolishDescription(current, title, author) {
+    const currentDesc = clean(current || '');
+    if (isLikelyPolish(currentDesc)) return currentDesc;
+
+    const wiki = await fetchWikipediaDescription(title, author);
+    if (isLikelyPolish(wiki)) return wiki;
+
+    const lubimy = await fetchLubimyCzytacDescription(title, author);
+    if (isLikelyPolish(lubimy)) return lubimy;
+
+    const ol = await fetchOLDescriptionOnly(title, author);
+    if (isLikelyPolish(ol)) return ol;
+
+    return currentDesc || ol || '';
+  }
+
+  function chooseBestGoogleItem(searchTitle, searchAuthor, items) {
+    const scored = (items || [])
+      .map(item => ({
+        item,
+        score: scoreBookCandidate(
+          searchTitle,
+          searchAuthor,
+          item?.volumeInfo?.title || '',
+          (item?.volumeInfo?.authors || []).join(' ')
+        ),
+      }))
+      .sort((a, b) => b.score - a.score);
+    return scored[0]?.item || null;
+  }
+
+  function chooseBestOpenLibraryDoc(searchTitle, searchAuthor, docs) {
+    const scored = (docs || [])
+      .map(doc => ({
+        doc,
+        score: scoreBookCandidate(
+          searchTitle,
+          searchAuthor,
+          doc?.title || '',
+          (doc?.author_name || []).join(' ')
+        ),
+      }))
+      .sort((a, b) => b.score - a.score);
+    return scored[0]?.doc || null;
+  }
+
+  function scoreBookCandidate(searchTitle, searchAuthor, resultTitle, resultAuthor) {
+    const st = normalizeWords(searchTitle);
+    const sa = normalizeWords(searchAuthor);
+    const rt = normalizeWords(resultTitle);
+    const ra = normalizeWords(resultAuthor);
+
+    const titleScore = overlapRatio(st, rt);
+    const authorScore = overlapRatio(sa, ra);
+    const missingTitlePenalty = st.length && titleScore === 0 ? 0.25 : 0;
+
+    return titleScore * 0.8 + authorScore * 0.2 - missingTitlePenalty;
+  }
+
+  function overlapRatio(a, b) {
+    if (!a.length) return 0;
+    const hits = a.filter(w => b.some(x => x === w || x.includes(w) || w.includes(x))).length;
+    return hits / a.length;
+  }
+
+  function normalizeWords(s) {
+    return (s || '')
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 3);
+  }
+
+  function isLikelyPolish(text) {
+    const t = clean(text || '').toLowerCase();
+    if (!t) return false;
+    if (/[ąćęłńóśźż]/.test(t)) return true;
+
+    const words = t.split(/\s+/).filter(Boolean);
+    if (!words.length) return false;
+
+    const plMarkers = new Set([
+      'się', 'oraz', 'który', 'która', 'które', 'jest', 'został', 'została',
+      'powieść', 'książka', 'wydanie', 'autor', 'autorka', 'opowiada',
+      'jego', 'jej', 'przez', 'więc', 'gdzie', 'także', 'czyli', 'po',
+      'nie', 'dla', 'oraz', 'nad', 'pod', 'między', 'lat', 'roku'
+    ]);
+    const enMarkers = new Set([
+      'the', 'and', 'with', 'this', 'that', 'from', 'into', 'about',
+      'book', 'novel', 'story', 'author', 'published', 'edition'
+    ]);
+
+    let plHits = 0;
+    let enHits = 0;
+    for (const w of words) {
+      if (plMarkers.has(w)) plHits++;
+      if (enMarkers.has(w)) enHits++;
+    }
+
+    return plHits >= 2 || (plHits >= 1 && plHits >= enHits);
   }
 
   /* ── OCR word extraction ──────────────────────────────── */
