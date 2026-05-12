@@ -46,20 +46,37 @@ export async function onRequestGet(context) {
 
     const searchHtml = await searchRes.text();
 
-    // Extract first book slug — pattern: href="/ksiazka/12345/slug"
-    let linkMatch = searchHtml.match(/href="(\/ksiazka\/\d+\/[^"?]+)"/);
-    
-    // Fallback: try alternative patterns
-    if (!linkMatch) {
-      linkMatch = searchHtml.match(/href="(\/ksiazka\/\d+)"/);
+    // Extract ALL book links, then pick best match by title/slug word overlap
+    const allLinks = [...searchHtml.matchAll(/href="(\/ksiazka\/\d+\/([^"?]+))"[^>]*>([^<]{3,})<\/a>/g)];
+    const unique = new Map();
+    for (const m of allLinks) {
+      if (!unique.has(m[1])) unique.set(m[1], { path: m[1], slug: m[2], linkTitle: m[3].trim() });
     }
-    
-    if (!linkMatch) {
-      console.log('[LubimyCzytac] No book link found in search results');
+    const candidates = [...unique.values()];
+
+    if (!candidates.length) {
+      console.log('[LubimyCzytac] No book links found in search results');
       return Response.json({ description: '', source: null }, { headers });
     }
 
-    const bookPath = linkMatch[1];
+    // Score each candidate by word overlap with search phrase
+    const normWords = s => s.toLowerCase()
+      .replace(/[^\w\s]/g, ' ').split(/[\s\-_]+/).filter(w => w.length >= 3);
+    const needles = normWords(phrase);
+
+    function titleScore(cand) {
+      const hay = normWords(cand.linkTitle + ' ' + cand.slug);
+      if (!needles.length) return 0;
+      return needles.filter(w => hay.some(h => h.includes(w) || w.includes(h))).length / needles.length;
+    }
+
+    const best = candidates.reduce((a, b) => titleScore(a) >= titleScore(b) ? a : b);
+    if (titleScore(best) < 0.25) {
+      console.log('[LubimyCzytac] No good match found, best score:', titleScore(best));
+      return Response.json({ description: '', source: null }, { headers });
+    }
+
+    const bookPath = best.path;
     const bookUrl  = 'https://lubimyczytac.pl' + bookPath;
 
     // ── Step 2: Fetch book page with retry ────────────────

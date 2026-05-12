@@ -67,15 +67,79 @@ const Books = (() => {
     }
 
     if (result) {
-      // Priority: LubimyCzytac (Polish) → OL → keep existing
+      // Description priority: Wikipedia (PL) → LubimyCzytac → OL
       if (!result.description) {
+        const descTitle  = result.title  || title;
+        const descAuthor = result.author || author;
         result.description =
-          await fetchLubimyCzytacDescription(result.title || title, result.author || author) ||
-          await fetchOLDescriptionOnly(result.title || title, result.author || author);
+          await fetchWikipediaDescription(descTitle, descAuthor) ||
+          await fetchLubimyCzytacDescription(descTitle, descAuthor) ||
+          await fetchOLDescriptionOnly(descTitle, descAuthor);
       }
       cache.set(cacheKey, result);
     }
     return result;
+  }
+
+  /* ── Polish Wikipedia description ─────────────────────── */
+  /**
+   * Searches pl.wikipedia.org and returns the intro extract of the
+   * best-matching article. Works client-side (no CORS issues).
+   */
+  async function fetchWikipediaDescription(title, author) {
+    if (!title) return '';
+    try {
+      const q = [title, author].filter(Boolean).join(' ');
+      const searchUrl =
+        'https://pl.wikipedia.org/w/api.php' +
+        '?action=query&list=search&srnamespace=0&srlimit=6&format=json&origin=*' +
+        '&srsearch=' + encodeURIComponent(q);
+
+      const sr = await fetch(searchUrl, { signal: AbortSignal.timeout(8000) });
+      if (!sr.ok) return '';
+      const sd = await sr.json();
+      const results = sd.query?.search || [];
+      if (!results.length) return '';
+
+      // Pick best article: score by word overlap, boost novel articles, penalise films
+      const norm = s => (s || '').toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length >= 3);
+
+      const needles = norm(title);
+      const scored = results.map(r => {
+        const hay = norm(r.title);
+        const hits = needles.filter(w => hay.some(h => h.includes(w) || w.includes(h))).length;
+        const base = needles.length ? hits / needles.length : 0;
+        const boost = r.title.includes('powieść') ? 0.25
+                    : (r.title.includes('film') || r.title.includes('gra')) ? -0.3 : 0;
+        return { title: r.title, score: base + boost };
+      }).sort((a, b) => b.score - a.score);
+
+      if (!scored.length || scored[0].score < 0.3) return '';
+
+      const wTitle = scored[0].title;
+      const exUrl =
+        'https://pl.wikipedia.org/w/api.php' +
+        '?action=query&prop=extracts&exintro=1&exsentences=6&format=json&origin=*' +
+        '&titles=' + encodeURIComponent(wTitle);
+
+      const ex = await fetch(exUrl, { signal: AbortSignal.timeout(7000) });
+      if (!ex.ok) return '';
+      const ed = await ex.json();
+      const pages = Object.values(ed.query?.pages || {});
+      const raw = pages[0]?.extract || '';
+      const text = raw
+        .replace(/<[^>]+>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 800);
+
+      return text.length > 80 ? text : '';
+    } catch (e) {
+      console.warn('[Books] Wikipedia error:', e.message);
+      return '';
+    }
   }
 
   /* ── LubimyCzytac (via Cloudflare Pages Function) ────── */
