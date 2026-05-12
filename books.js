@@ -99,14 +99,13 @@ const Books = (() => {
     const ranked = candidates
       .map(c => ({
         ...c,
-        _score: scoreBookCandidate(title, author, c.title, c.author),
+        _score: scoreBookCandidate(title, author, c.title, c.author, rawText),
       }))
       .sort((a, b) => b._score - a._score);
 
-    let book = ranked[0] || null;
-    if (book && !validateResult(title, author, book) && ranked[1]) {
-      book = ranked[1];
-    }
+    const guarded = ranked.filter(c => candidatePassesGuards(title, author, rawText, c));
+    let book = guarded[0] || null;
+
     if (book) {
       book.description = await ensurePolishDescription(
         book.description || '',
@@ -476,7 +475,8 @@ const Books = (() => {
     const ol = await fetchOLDescriptionOnly(title, author);
     if (isLikelyPolish(ol)) return ol;
 
-    return currentDesc || ol || '';
+    // Keep output language consistent: if we fail to get PL text, return empty
+    return '';
   }
 
   function chooseBestGoogleItem(searchTitle, searchAuthor, items) {
@@ -509,17 +509,61 @@ const Books = (() => {
     return scored[0]?.doc || null;
   }
 
-  function scoreBookCandidate(searchTitle, searchAuthor, resultTitle, resultAuthor) {
+  function scoreBookCandidate(searchTitle, searchAuthor, resultTitle, resultAuthor, rawText = '') {
     const st = normalizeWords(searchTitle);
     const sa = normalizeWords(searchAuthor);
     const rt = normalizeWords(resultTitle);
     const ra = normalizeWords(resultAuthor);
+    const rawSignal = ocrSignalWords(rawText);
 
     const titleScore = overlapRatio(st, rt);
     const authorScore = overlapRatio(sa, ra);
+    const rawTitleScore = overlapRatio(rt, rawSignal);
     const missingTitlePenalty = st.length && titleScore === 0 ? 0.25 : 0;
+    const missingRawPenalty = rawSignal.length >= 4 && rawTitleScore === 0 ? 0.20 : 0;
+    const strongPotterBoost =
+      rawSignal.includes('harry') && rawSignal.includes('potter') &&
+      rt.includes('harry') && rt.includes('potter') ? 0.6 : 0;
+    const strongPotterPenalty =
+      rawSignal.includes('potter') && !rt.includes('potter') ? 0.45 : 0;
 
-    return titleScore * 0.8 + authorScore * 0.2 - missingTitlePenalty;
+    return (
+      titleScore * 0.65 +
+      authorScore * 0.15 +
+      rawTitleScore * 0.20 +
+      strongPotterBoost -
+      missingTitlePenalty -
+      missingRawPenalty -
+      strongPotterPenalty
+    );
+  }
+
+  function candidatePassesGuards(searchTitle, searchAuthor, rawText, candidate) {
+    if (!candidate?.title) return false;
+
+    const qWords = normalizeWords([searchTitle, searchAuthor].join(' '));
+    const cWords = normalizeWords([candidate.title, candidate.author].join(' '));
+    const cTitleWords = normalizeWords(candidate.title);
+    const rawSignal = ocrSignalWords(rawText);
+
+    const queryOverlap = overlapRatio(qWords, cWords);
+    const rawOverlap = overlapRatio(cTitleWords, rawSignal);
+    const score = scoreBookCandidate(searchTitle, searchAuthor, candidate.title, candidate.author, rawText);
+
+    if (qWords.length >= 2) {
+      if (queryOverlap < 0.38) return false;
+      if (!validateResult(searchTitle, searchAuthor, candidate)) return false;
+      return score >= 0.22;
+    }
+
+    if (rawSignal.length >= 3) {
+      const topRaw = rawSignal.slice(0, 4);
+      const hasTopAnchor = topRaw.some(w => cTitleWords.some(t => t === w || t.includes(w) || w.includes(t)));
+      if (!hasTopAnchor && rawOverlap < 0.20) return false;
+      return score >= 0.15;
+    }
+
+    return score >= 0.12;
   }
 
   function overlapRatio(a, b) {
@@ -610,6 +654,22 @@ const Books = (() => {
       console.log('[Books] ISBN from OCR:', out);
     }
     return out;
+  }
+
+  function ocrSignalWords(rawText) {
+    if (!rawText) return [];
+    const stop = new Set([
+      ...PL_STOPWORDS,
+      'pass', 'inverted', 'ocr', 'wydawnictwo', 'stron', 'tom', 'volume',
+      'book', 'novel', 'edition', 'copyright', 'printed'
+    ]);
+    const words = normalizeWords(rawText).filter(w => w.length >= 4 && !stop.has(w));
+    const counts = new Map();
+    for (const w of words) counts.set(w, (counts.get(w) || 0) + 1);
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([w]) => w)
+      .slice(0, 20);
   }
 
   function isValidIsbn13(v) {
