@@ -1,47 +1,89 @@
 /**
- * ocr.js — OCR module using Cloudflare AI
- * Extracts text from book cover images and returns title/author.
+ * ocr.js — OCR module using Tesseract.js (client-side)
+ * Extracts text from book cover images with English + Polish support
  */
 
 const OCR = (() => {
-  const API_ENDPOINT = '/api/ocr';
+  let tesseractWorker = null;
 
   /**
-   * Run OCR on an image file via Cloudflare Pages Function.
+   * Initialize Tesseract.js worker (lazy loaded).
+   */
+  async function initTesseract() {
+    if (tesseractWorker) return tesseractWorker;
+
+    // Load Tesseract.js from CDN
+    if (typeof Tesseract === 'undefined') {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@v5.0.4/dist/tesseract.min.js';
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }
+
+    tesseractWorker = await Tesseract.createWorker({
+      corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@v5.2.0/tesseract-core.wasm.js',
+      cacheMethod: 'IndexedDB',
+    });
+
+    return tesseractWorker;
+  }
+
+  /**
+   * Run OCR on an image file using Tesseract.js
    */
   async function recognize(source, onProgress) {
     if (!(source instanceof File || source instanceof Blob)) {
       throw new Error('OCR: input must be File or Blob');
     }
 
-    if (onProgress) onProgress(0.15);
+    const worker = await initTesseract();
 
-    const formData = new FormData();
-    formData.append('image', source);
+    if (onProgress) onProgress(0.2);
 
-    const res = await fetch(API_ENDPOINT, {
-      method: 'POST',
-      body: formData,
-      signal: AbortSignal.timeout(45000),
-    });
+    // Run OCR with English + Polish languages
+    const result = await worker.recognize(source, 'eng+pol');
 
-    if (onProgress) onProgress(0.85);
+    if (onProgress) onProgress(0.9);
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `OCR API returned ${res.status}`);
+    const rawText = result.data.text || '';
+    const lines = rawText
+      .split(/\n/)
+      .map(l => l.trim())
+      .filter(l => l.length > 0);
+
+    // Extract title and author from recognized text
+    // Assuming title is first significant line, author is second
+    let title = '';
+    let author = '';
+
+    for (const line of lines) {
+      if (line.length > 3 && !title) {
+        title = line;
+      } else if (line.length > 3 && title && !author) {
+        author = line;
+        break;
+      }
     }
 
-    const data = await res.json();
     return {
-      rawText: data.rawText || '',
-      title: data.title || '',
-      author: data.author || '',
+      rawText,
+      title: title.slice(0, 150),
+      author: author.slice(0, 100),
     };
   }
 
-  /** No-op — worker runs server-side */
-  async function terminate() {}
+  /**
+   * Cleanup Tesseract worker.
+   */
+  async function terminate() {
+    if (tesseractWorker) {
+      await tesseractWorker.terminate();
+      tesseractWorker = null;
+    }
+  }
 
   return { recognize, terminate };
 })();
