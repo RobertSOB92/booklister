@@ -32,15 +32,15 @@ export async function onRequestPost(context) {
     const base64 = arrayBufferToBase64(buffer);
     const mimeType = imageFile.type || 'image/jpeg';
 
-    // Call Cloudflare AI OCR model (using Llama 4 Scout - multimodal, no EU restrictions)
-    const response = await env.AI.run('@cf/meta/llama-4-scout-17b-16e-instruct', {
+    // Call Cloudflare AI OCR model (using Kimi K2.6 - multimodal vision model)
+    const response = await env.AI.run('@moonshot/kimi-k2.6', {
       messages: [
         {
           role: 'user',
           content: [
             {
-              type: 'image',
-              source: {
+              type: 'image_url',
+              image_url: {
                 url: `data:${mimeType};base64,${base64}`,
               },
             },
@@ -68,7 +68,7 @@ LIKELY AUTHOR: [author name]`,
     // Parse AI response
     const aiText = typeof response?.result === 'string'
       ? response.result
-      : (response?.result?.[0]?.content || response?.result?.message || '');
+      : (response?.result?.[0]?.content || response?.result?.message?.content || '');
     
     const rawText = extractTextSection(aiText);
     const { title, author } = parseAiResponse(aiText, rawText);
