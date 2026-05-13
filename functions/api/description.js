@@ -186,3 +186,16 @@ function stripTags(html) {
     .replace(/[ \t]+/g, ' ')
     .trim();
 }
+
+// CORS preflight handler
+export async function onRequestOptions(context) {
+  return new Response(null, {
+    status: 200,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Cache-Control': 'public, max-age=86400',
+    },
+  });
+}
