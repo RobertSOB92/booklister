@@ -32,8 +32,8 @@ export async function onRequestPost(context) {
     const base64 = arrayBufferToBase64(buffer);
     const mimeType = imageFile.type || 'image/jpeg';
 
-    // Call Cloudflare AI OCR model
-    const response = await env.AI.run('@cf/llava-1.5-7b-hf', {
+    // Call Cloudflare AI OCR model (using Llama 3.2 Vision)
+    const response = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
       image: [
         {
           url: `data:${mimeType};base64,${base64}`,
