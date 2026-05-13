@@ -32,12 +32,21 @@ export async function onRequestPost(context) {
     const base64 = arrayBufferToBase64(buffer);
     const mimeType = imageFile.type || 'image/jpeg';
 
-    // Call Cloudflare AI OCR model (using Llama 3.2 Vision)
-    const response = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
+    // Call Cloudflare AI OCR model (using Llama 4 Scout - multimodal, no EU restrictions)
+    const response = await env.AI.run('@cf/meta/llama-4-scout-17b-16e-instruct', {
       messages: [
         {
           role: 'user',
-          content: `Analyze this book cover image and extract all visible text:
+          content: [
+            {
+              type: 'image',
+              source: {
+                url: `data:${mimeType};base64,${base64}`,
+              },
+            },
+            {
+              type: 'text',
+              text: `Analyze this book cover image and extract all visible text:
 
 1. List every word/text you can read on the cover
 2. Identify the book title (usually the largest text)
@@ -50,15 +59,16 @@ TEXT FOUND ON COVER:
 
 LIKELY TITLE: [main title]
 LIKELY AUTHOR: [author name]`,
+            },
+          ],
         },
       ],
-      image: `data:${mimeType};base64,${base64}`,
     });
 
     // Parse AI response
     const aiText = typeof response?.result === 'string'
       ? response.result
-      : (response?.result?.[0]?.content || '');
+      : (response?.result?.[0]?.content || response?.result?.message || '');
     
     const rawText = extractTextSection(aiText);
     const { title, author } = parseAiResponse(aiText, rawText);
