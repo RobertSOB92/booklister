@@ -32,8 +32,8 @@ export async function onRequestPost(context) {
     const base64 = arrayBufferToBase64(buffer);
     const mimeType = imageFile.type || 'image/jpeg';
 
-    // Call Cloudflare AI OCR model (using Llama 3.2 Vision)
-    const response = await env.AI.run('@cf/meta/llama-3.2-11b-vision-instruct', {
+    // Call Cloudflare AI OCR model (using Qwen Vision)
+    const response = await env.AI.run('@cf/qwen/qwen-vl-max-10-2024-09-30', {
       image: [
         {
           url: `data:${mimeType};base64,${base64}`,
@@ -50,7 +50,6 @@ TEXT FOUND ON COVER:
 
 LIKELY TITLE: [the main title]
 LIKELY AUTHOR: [the author name if visible]`,
-      agree: true,
     });
 
     // Parse AI response
