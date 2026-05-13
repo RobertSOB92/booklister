@@ -50,6 +50,7 @@ TEXT FOUND ON COVER:
 
 LIKELY TITLE: [the main title]
 LIKELY AUTHOR: [the author name if visible]`,
+      agree: true,
     });
 
     // Parse AI response
