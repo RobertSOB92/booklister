@@ -9,6 +9,7 @@ const App = (() => {
     books: [],
     settings: {
       prefix: '',
+      autoSearch: true,
     },
     nextId: 1,
     processing: false,
