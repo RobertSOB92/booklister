@@ -24,12 +24,12 @@ describe('formatBookText utilities', () => {
   });
 
   it('should format all results correctly without prefix', () => {
-    const expected = `Test Title - Test Author\n\nThis is a test description.\nSource: https://example.com`;
+    const expected = `Test Title - Test Author\n\nThis is a test description.`;
     expect(formatAllResults([book], '')).toBe(expected);
   });
 
   it('should format all results correctly with prefix', () => {
-    const expected = `Test Title - Test Author #Polecajka\n\nThis is a test description.\nSource: https://example.com`;
+    const expected = `Test Title - Test Author #Polecajka\n\nThis is a test description.`;
     expect(formatAllResults([book], '#Polecajka')).toBe(expected);
   });
 });

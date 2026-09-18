@@ -16,6 +16,6 @@ export const formatAllResults = (books: BookResult[], prefix: string): string =>
   return books.map((book) => {
     const cleanPrefix = prefix.trim();
     const header = `${book.title} - ${book.author}${cleanPrefix ? ' ' + cleanPrefix : ''}`;
-    return `${header}\n\n${book.description}\nSource: ${book.sourceUrl}`;
+    return `${header}\n\n${book.description}`;
   }).join('\n\n---\n\n');
 };
