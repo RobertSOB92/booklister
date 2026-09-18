@@ -11,8 +11,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'icons/icon-192.png', 'icons/icon-512.png'],
       manifest: {
-        name: "AI Book Scanner",
-        short_name: "Book Scanner",
+        name: "Booklister",
+        short_name: "Booklister",
         description: "Rozpoznawanie książek na podstawie zdjęć okładek przy użyciu Google Gemini.",
         start_url: "/",
         display: "standalone",
